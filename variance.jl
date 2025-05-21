@@ -20,7 +20,7 @@ using Manopt
 using Printf
 
 # Debug parameters
-DEBUG = true
+DEBUG = false
 PARTICLE_COUNT = DEBUG ? 10^1 : 10^3
 SAMPLES        = DEBUG ? 10^2 : 10^5
 STEPS          = DEBUG ? 25   : 10^2
@@ -189,11 +189,11 @@ fs = [(ix, iy, iz) -> B[i](x => ix, y => iy, z => iz) for i in 1:3]
 # fieldᵣ = (ix, iy, iz) -> map(f -> f(ix, iy, iz), fs)
 
 
-figname = case1()
+# figname = case1()
 # figname = case2()
 # figname = case3()
 # figname = case4()
-# figname = case4(1)
+figname = case4(1)
 
 if !isdir("plots/$figname")
   mkdir("plots/$figname")
@@ -206,7 +206,9 @@ if false
   savefig("plots/$figname/2D.png", fignumber)
 end
 
-fsᵣₑₗ = [(x, y, z) -> fsₑ[i](x, y, z) / fs[i](x, y, z) for i in 1:3]
+# fsᵣₑₗ = [(x, y, z) -> fsₑ[i](x, y, z) / fs[i](x, y, z) for i in 1:3]
+Bᵣₑₗ = [Bₑ[i] / B[i] for i in 1:3]
+fsᵣₑₗ = [(ix, iy, iz) -> Bᵣₑₗ[i](x => ix, y => iy, z => iz) for i in 1:3]
 
 fieldErrorᵣ = (ix, iy, iz) -> map(f -> f(ix, iy, iz), fsₑ)
 relativeFieldErrorᵣ = (ix, iy, iz) -> map(f -> f(ix, iy, iz), fsᵣₑₗ)
@@ -217,48 +219,60 @@ if false
   println("Field error in [0, 0, R]: ", round(fieldErrorᵣ(0, 0, R), digits=4), " | ", round.(relativeFieldErrorᵣ(0, 0, R) .* 100, digits=4), "%")
 end
 
+averageFieldErrorStrings = Dict{String, String}()
 for (fₑ, fᵣₑₗ, dir) in zip(fsₑ, fsᵣₑₗ, ["x", "y", "z"])
+  global averageFieldErrorStr
+
   fₐ = (a, b, c) -> abs(fₑ(a, b, c))
   averageError = meanErrorMonteCarlo(fₐ, R, SAMPLES)
 
   fₐᵣ = (a, b, c) -> abs(fᵣₑₗ(a, b, c))
   averageRelativeError = meanErrorMonteCarlo(fₐᵣ, R, SAMPLES)
 
-  println("Mean field error in $dir-direction: ",
-    @sprintf("%.4g", averageError), " | ",
-    @sprintf("%.2g", averageRelativeError * 100), "%")
+  averageDirErrorStr = @sprintf("%.4g", averageError) * " | " * @sprintf("%.2g", averageRelativeError * 100) * "%"
+  averageFieldErrorStrings[dir] = averageDirErrorStr
+  println("Mean field error in $dir-direction: ", averageDirErrorStr)
 end
 
 xs, ys, zs = ntuple(_ -> range(-R, R; length=STEPS), 3)
+
 fieldErrorᵢ = [[(x^2 + y^2 + z^2 <= R^2) ? abs.(f(x, y, z)) : NaN for x in xs, y in ys, z in zs] for f in fsₑ]
 fieldᵢ = [[(x^2 + y^2 + z^2 <= R^2) ? abs.(f(x, y, z)) : NaN for x in xs, y in ys, z in zs] for f in fs]
-relativeErrorᵢ = nothing
+relativeErrorᵢ = [fieldErrorᵢ[i] ./ fieldᵢ[i] for i in 1:3]
+all_rel_errors = vcat([vec(re[.!isnan.(re) .& .!isinf.(re)]) for re in relativeErrorᵢ]...)
+upper = mean(all_rel_errors) + 2 * std(all_rel_errors)
+relativeErrorᵢ = [clamp.(re, 0, upper) for re in relativeErrorᵢ]
 
 # Find the global min and max for color scaling
 crangeₑ = extrema(Iterators.flatten(ferr for fe in fieldErrorᵢ for ferr in fe if !isnan(ferr)))
 crange = extrema(Iterators.flatten(f for fe in fieldᵢ for f in fe if !isnan(f)))
+crangeᵣₑₗ = extrema(Iterators.flatten(ferr for fe in relativeErrorᵢ for ferr in fe if !isnan(ferr)))
 
-fig = GLMakie.Figure(size=(1400, 800))
+fig = GLMakie.Figure(size=(1400, 1200), resolution=(2800, 2400), fontsize=28)
 
-axsₑ = [Axis3(fig[1, i]; aspect=(1,1,1), perspectiveness=0.5, xlabelsize=12, xticklabelsize=12, ylabelsize=12, yticklabelsize=12, zlabelsize=12, zticklabelsize=12) for i=1:3]
-volsₑ = [volume!(axsₑ[i], xs, ys, zs, fieldErrorᵢ[i]; colorrange=crangeₑ) for i in 1:3]
-for (ax, label) in zip(axsₑ, ["x", "y", "z"])
-  ax.title = "$label-direction"
+axsᵣₑₗ = [Axis3(fig[1, i]; aspect=(1,1,1), perspectiveness=0.5, xlabeloffset=100, ylabeloffset=100, zlabeloffset=100) for i=1:3]
+volsᵣₑₗ = [volume!(axsᵣₑₗ[i], xs, ys, zs, relativeErrorᵢ[i]; colorrange=crangeᵣₑₗ) for i in 1:3]
+Colorbar(fig[1, 4], volsᵣₑₗ[1], label="Relative Error", height=Relative(0.7))
+for (ax, label) in zip(axsᵣₑₗ, ["x", "y", "z"])
+  ax.title = "$label-dir (ME: $(averageFieldErrorStrings[label]))"
 end
-Colorbar(fig[1, 4], volsₑ[1], label="Field Error", height=Relative(0.7))
 
-axs = [Axis3(fig[2, i]; aspect=(1,1,1), perspectiveness=0.5, xlabelsize=12, xticklabelsize=12, ylabelsize=12, yticklabelsize=12, zlabelsize=12, zticklabelsize=12) for i=1:3]
+axsₑ = [Axis3(fig[2, i]; aspect=(1,1,1), perspectiveness=0.5, xlabeloffset=100, ylabeloffset=100, zlabeloffset=100) for i=1:3]
+volsₑ = [volume!(axsₑ[i], xs, ys, zs, fieldErrorᵢ[i]; colorrange=crangeₑ) for i in 1:3]
+Colorbar(fig[2, 4], volsₑ[1], label="Field Error", height=Relative(0.7))
+
+axs = [Axis3(fig[3, i]; aspect=(1,1,1), perspectiveness=0.5, xlabeloffset=100, ylabeloffset=100, zlabeloffset=100) for i=1:3]
 vols = [volume!(axs[i], xs, ys, zs, fieldᵢ[i]; colorrange=crange) for i in 1:3]
-Colorbar(fig[2, 4], vols[1], label="Field", height=Relative(0.7))
+Colorbar(fig[3, 4], vols[1], label="Field", height=Relative(0.7))
 save("plots/$figname/3D-$(DEBUG ? 'd' : 'r').png", fig)
 
-all_axes = vcat(axsₑ, axs)
+all_axes = vcat(axsᵣₑₗ, axsₑ, axs)
 for ax in all_axes
   ax.viewmode = :fit
   ax.tellwidth = false
   ax.tellheight = false
-  ax.width = 200
-  ax.height = 200
+  ax.width = 400
+  ax.height = 400
   ax.protrusions = 0
   attributes = ["ticksvisible", "labelvisible", "ticklabelsvisible", "gridvisible", "spinesvisible"]
   for attr in attributes
