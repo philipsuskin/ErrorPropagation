@@ -183,6 +183,23 @@ function case4(σ² = 2)
   return "varianceAngleOptimized-$(σ²)deg"
 end
 
+function case5(σ₁² = 2, σ₂² = 1)
+  if σ₁² < 0 || σ₂² < 0
+    throw(ArgumentError("Variance must be a non-negative number."))
+  end
+
+  # Assuming variance of angle from sphere center sensor position in degrees (θ, ϕ)
+  # The erroneous sensor positions are optimized to minimize square distance to all expected sensor positions
+  # The optimized sensor positions are passed to the solid harmonics
+  figname = case4(σ₁²)
+
+  # Assuming variance of solid harmonics (Z_l^m)
+  figname *= " + " * case2(σ₂²)
+
+  return figname
+
+end
+
 coeffs = h5read("data/coeffs.h5", "coeffs")
 cs = [SphericalHarmonicCoefficients(vec(coeffs[i, 1, :]), R, true) for i in 1:3]
 B = [sphericalHarmonicsExpansion(c, x, y, z) for c in cs]
@@ -194,17 +211,17 @@ fs = [(ix, iy, iz) -> B[i](x => ix, y => iy, z => iz) for i in 1:3]
 # figname = case2()
 # figname = case3()
 # figname = case4()
-figname = case4(3.2)
+figname = case4(1)
 
-if !isdir("plots/$figname")
-  mkdir("plots/$figname")
+if !isdir("figures/$figname")
+  mkdir("figures/$figname")
 end
 
 Bₑ = σ²ᵦ
 fsₑ = [(ix, iy, iz) -> Bₑ[i](x => ix, y => iy, z => iz) for i in 1:3]
 if false
   fignumber = plotMagneticField([fsₑ[1], fsₑ[2], fsₑ[3]], R, center=center)
-  savefig("plots/$figname/2D.png", fignumber)
+  savefig("figures/$figname/2D.png", fignumber)
 end
 
 # fsᵣₑₗ = [(x, y, z) -> fsₑ[i](x, y, z) / fs[i](x, y, z) for i in 1:3]
@@ -263,7 +280,7 @@ Colorbar(fig[2, 4], volsₑ[1], label="Field Error", height=Relative(0.7))
 axs = [Axis3(fig[3, i]; aspect=(1,1,1), perspectiveness=0.5, xlabeloffset=100, ylabeloffset=100, zlabeloffset=100) for i=1:3]
 vols = [volume!(axs[i], xs, ys, zs, fieldᵢ[i]; colorrange=crange) for i in 1:3]
 Colorbar(fig[3, 4], vols[1], label="Field", height=Relative(0.7))
-save("plots/$figname/3D-$(DEBUG ? 'd' : 'r').png", fig)
+save("figures/$figname/3D-$(DEBUG ? 'd' : 'r').png", fig)
 
 all_axes = vcat(axsᵣₑₗ, axsₑ, axs)
 for ax in all_axes
@@ -282,6 +299,6 @@ for ax in all_axes
 end
 angles = range(0, 2π; length=FRAMES+1)[1:end-1]
 
-record(fig, "plots/$figname/animation-$(DEBUG ? 'd' : 'r').gif", 1:FRAMES) do i
+record(fig, "figures/$figname/animation-$(DEBUG ? 'd' : 'r').gif", 1:FRAMES) do i
   map(ax -> ax.azimuth = angles[i], all_axes)
 end
