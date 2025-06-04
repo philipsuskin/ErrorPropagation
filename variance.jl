@@ -272,9 +272,19 @@ if false
   println("Field error in [0, 0, R]: ", round(fieldErrorᵣ(0, 0, R), digits=4), " | ", round.(relativeFieldErrorᵣ(0, 0, R) .* 100, digits=4), "%")
 end
 
+if false
+  errorTDesign = loadTDesign(25, 328, R)
+  evaluation = [fieldErrorᵣ((pos * R)...) for pos in eachcol(errorTDesign.positions)]
+  filename = "fieldError-tDes(25, 328, $R).txt"
+  open(filename, "w") do io
+    writedlm(io, evaluation)
+  end
+end
+
 averageFieldErrorStrings = Dict{String, String}()
 for (fₑ, fᵣₑₗ, dir) in zip(fsₑ, fsᵣₑₗ, ["x", "y", "z"])
-  averageError = meanErrorMonteCarlo(fₑ, R, SAMPLES)
+  # averageError = meanErrorMonteCarlo(fₑ, R, SAMPLES)
+  averageError = meanError(fₑ, R)
 
   fₐᵣ = (a, b, c) -> abs(fᵣₑₗ(a, b, c))
   averageRelativeError = meanErrorMonteCarlo(fₐᵣ, R, SAMPLES)
@@ -302,8 +312,8 @@ end
 if !DEBUG
   xs, ys, zs = ntuple(_ -> range(-R, R; length=STEPS), 3)
 
-  fieldErrorᵢ = [[(x^2 + y^2 + z^2 <= R^2) ? abs.(f(x, y, z)) : NaN for x in xs, y in ys, z in zs] for f in fsₑ]
-  fieldᵢ = [[(x^2 + y^2 + z^2 <= R^2) ? abs.(f(x, y, z)) : NaN for x in xs, y in ys, z in zs] for f in fs]
+  fieldErrorᵢ = [[(x^2 + y^2 + z^2 <= R^2) ? f(x, y, z) * 1e6 : NaN for x in xs, y in ys, z in zs] for f in fsₑ]
+  fieldᵢ = [[(x^2 + y^2 + z^2 <= R^2) ? abs.(f(x, y, z)) * 1e3 : NaN for x in xs, y in ys, z in zs] for f in fs]
   relativeErrorᵢ = [fieldErrorᵢ[i] ./ fieldᵢ[i] for i in 1:3]
   all_rel_errors = vcat([vec(re[.!isnan.(re) .& .!isinf.(re)]) for re in relativeErrorᵢ]...)
   upper = mean(all_rel_errors) + 2 * std(all_rel_errors)
@@ -315,22 +325,25 @@ if !DEBUG
   crange = extrema(Iterators.flatten(f for fe in fieldᵢ for f in fe if !isnan(f)))
   crangeᵣₑₗ = extrema(Iterators.flatten(ferr for fe in relativeErrorᵢ for ferr in fe if !isnan(ferr)))
 
-  fig = GLMakie.Figure(size=(1400, 1200), resolution=(2800, 2400), fontsize=28)
+  fig = GLMakie.Figure(size=(1400, 800), resolution=(2800, 1600), fontsize=28)
 
-  axsᵣₑₗ = [Axis3(fig[1, i]; aspect=(1,1,1), perspectiveness=0.5, xlabeloffset=100, ylabeloffset=100, zlabeloffset=100) for i=1:3]
-  volsᵣₑₗ = [volume!(axsᵣₑₗ[i], xs, ys, zs, relativeErrorᵢ[i]; colorrange=crangeᵣₑₗ) for i in 1:3]
-  Colorbar(fig[1, 4], volsᵣₑₗ[1], label="Relative Error", height=Relative(0.7))
-  for (ax, label) in zip(axsᵣₑₗ, ["x", "y", "z"])
-    ax.title = "$label-dir (ME: $(averageFieldErrorStrings[label]))"
+  # axsᵣₑₗ = [Axis3(fig[1, i]; aspect=(1,1,1), perspectiveness=0.5, xlabeloffset=100, ylabeloffset=100, zlabeloffset=100) for i=1:3]
+  # volsᵣₑₗ = [volume!(axsᵣₑₗ[i], xs, ys, zs, relativeErrorᵢ[i]; colorrange=crangeᵣₑₗ) for i in 1:3]
+  # Colorbar(fig[1, 4], volsᵣₑₗ[1], label="Relative Error", height=Relative(0.7))
+  # for (ax, label) in zip(axsᵣₑₗ, ["x", "y", "z"])
+  #   ax.title = "$label-dir (ME: $(averageFieldErrorStrings[label]))"
+  # end
+
+  axsₑ = [Axis3(fig[1, i]; aspect=(1,1,1), perspectiveness=0.5, xlabeloffset=100, ylabeloffset=100, zlabeloffset=100) for i=1:3]
+  volsₑ = [volume!(axsₑ[i], xs, ys, zs, fieldErrorᵢ[i]; colorrange=crangeₑ) for i in 1:3]
+  Colorbar(fig[1, 4], volsₑ[1], label="σ² / μT", height=Relative(0.7))
+  for (ax, label) in zip(axsₑ, ["x", "y", "z"])
+    ax.title = "$label-dir (ME: $(parse(Float64, split(averageFieldErrorStrings[label], " | ")[1]) * 1e6) μT)"
   end
 
-  axsₑ = [Axis3(fig[2, i]; aspect=(1,1,1), perspectiveness=0.5, xlabeloffset=100, ylabeloffset=100, zlabeloffset=100) for i=1:3]
-  volsₑ = [volume!(axsₑ[i], xs, ys, zs, fieldErrorᵢ[i]; colorrange=crangeₑ) for i in 1:3]
-  Colorbar(fig[2, 4], volsₑ[1], label="Field Error", height=Relative(0.7))
-
-  axs = [Axis3(fig[3, i]; aspect=(1,1,1), perspectiveness=0.5, xlabeloffset=100, ylabeloffset=100, zlabeloffset=100) for i=1:3]
+  axs = [Axis3(fig[2, i]; aspect=(1,1,1), perspectiveness=0.5, xlabeloffset=100, ylabeloffset=100, zlabeloffset=100) for i=1:3]
   vols = [volume!(axs[i], xs, ys, zs, fieldᵢ[i]; colorrange=crange) for i in 1:3]
-  Colorbar(fig[3, 4], vols[1], label="Field", height=Relative(0.7))
+  Colorbar(fig[2, 4], vols[1], label="B / mT", height=Relative(0.7))
 
   for ax in vcat(axsᵣₑₗ, axsₑ, axs)
     ax.xlabel = "x / mm"
