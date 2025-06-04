@@ -4,6 +4,8 @@ using MPIFiles
 include("utils/plotMagneticField.jl")
 include("utils/computeStatistics.jl")
 include("utils/coordinateConvert.jl")
+include("utils/tDesRotationOptim.jl")
+include("utils/rotationOffsetDef.jl")
 
 using MonteCarloMeasurements
 using Random
@@ -14,12 +16,9 @@ using Printf
 
 using HDF5
 using DelimitedFiles
-using Manifolds, ManifoldDiff
-using LinearAlgebra
-using Manopt
 
 # Debug parameters
-DEBUG = true
+DEBUG = false
 PARTICLE_COUNT = DEBUG ? 10^1 : 10^3
 SAMPLES        = DEBUG ? 10^2 : 10^5
 STEPS          = DEBUG ? 25   : 10^2
@@ -62,7 +61,7 @@ function case2(σ² = 1)
     throw(ArgumentError("Variance must be a non-negative number."))
   end
 
-  Zₗᵐ = Particles(PARTICLE_COUNT, Normal(0, σ²))
+  Zₗᵐ = Particles(PARTICLE_COUNT, Normal(0, sqrt(σ²)))
   for l in 0:L
     for m in -l:l
       for (i, cs) in enumerate([cxₑ, cyₑ, czₑ])
@@ -86,7 +85,7 @@ function case3(σ² = 1)
   
   rs = eachcol(tDesign.positions)
   ps = map(cartesian_to_spherical, rs)
-  ps_mc = [[r, θ + Particles(PARTICLE_COUNT, Normal(0, σ²)) * deg2rad, ϕ + Particles(PARTICLE_COUNT, Normal(0, σ²)) * deg2rad] for (r, θ, ϕ) in ps]
+  ps_mc = [[r, θ + deg2rad(Particles(PARTICLE_COUNT, Normal(0, sqrt(σ²)))), ϕ + deg2rad(Particles(PARTICLE_COUNT, Normal(0, sqrt(σ²)))) / sin(p[2] == 0 ? 1e-9 : p[2])] for (r, θ, ϕ) in ps]
   rs_mc = map(spherical_to_cartesian, ps_mc)
 
   for l in 0:L
@@ -109,33 +108,6 @@ end
 # The erroneous sensor positions are optimized to minimize square distance to all expected sensor positions
 # The optimized sensor positions are passed to the solid harmonics
 function case4(σ² = 2)
-  # Define cost funtion ∑ᵢ d(p*tDesᵢ,estimatedᵢ)², where d is the geodesic distance on the sphere S², tDesᵢ is a point from the tdesign positions in the CAD model, estimatedᵢ is a point from sensor estimation by their rotation matrices and p is a rotation matrix
-  function findtDesRotation(estimatedPos)
-    tDes = copy(tDesign.positions)
-    S2 = Manifolds.Sphere(2) # Unit Sphere
-    SO3 = SpecialOrthogonal(3) # Rotation group
-
-    G(p) = 1 / (2*N) * mapreduce(i->distance(S2, p*tDes[:,i], estimatedPos[:,1])^2, +, 1:N)
-    # Cost funtion for Manopt.jl
-    g(M, p) = G(p)
-
-    # Define gradient using automatic diffentiation https://manoptjl.org/stable/tutorials/AutomaticDifferentiation/
-    rb_onb_fwdd = ManifoldDiff.TangentDiffBackend(ManifoldDiff.AutoForwardDiff())
-    grad_g(M, p) = Manifolds.gradient(M, G, p, rb_onb_fwdd)
-    #@info "" check_gradient(SO3, g, grad_g)
-
-    # Initial value
-    R0 = project(SO3,I(3).*1.0) #rand(SO3)
-
-    # Gradient Descent https://redoblue.github.io/techblog/2019/02/22/optimization-riemannian-manifolds/
-    Rest = gradient_descent(SO3, g, grad_g, R0;
-      # debug=[:Iteration, (:Change, "|Δp|: %1.9f |"), (:Cost, " F(x): %1.11f | "), "\n", :Stop, 5],
-      stopping_criterion=StopWhenGradientNormLess(1e-6) | StopAfterIteration(100)
-    )
-
-    return Rest * tDes
-  end
-
   if σ² < 0
     throw(ArgumentError("Variance must be a non-negative number."))
   end
@@ -145,16 +117,17 @@ function case4(σ² = 2)
   calibrationRotation = reshape(readdlm("data/RotationCalibration.txt"), N, 3, 3)
   rs = [normalize(calibrationRotation[i, :, 3]) for i in 1:N]
   ps = reduce(hcat, map(cartesian_to_spherical, rs))
-  ps_mc = ps .+ [0, Particles(PARTICLE_COUNT, Normal(0, σ²)) * deg2rad, Particles(PARTICLE_COUNT, Normal(0, σ²)) * deg2rad]
+
+  ps_mc = ps .+ [0, deg2rad(Particles(PARTICLE_COUNT, Normal(0, sqrt(σ²)))), deg2rad(Particles(PARTICLE_COUNT, Normal(0, sqrt(σ²)))) / sin(p[2] == 0 ? 1e-9 : p[2])]
   # println(size(ps_mc), " - ", ps_mc[:, 1:2])
   rs_mc = reduce(hcat, map(spherical_to_cartesian, eachcol(ps_mc)))
   # println(size(rs_mc), " - ", rs_mc[:, 1:2])
 
-  rs_opt = [Particles(PARTICLE_COUNT) for _ in 1:3, _ in 1:N]
+  rs_opt = fill(Particles{Float64, PARTICLE_COUNT}(0.0), 3, N)
   for i = 1:PARTICLE_COUNT
     positions = map(p -> p.particles[i], rs_mc)
     # println(size(positions), " - ", positions[:, 1:2])
-    positions_opt = findtDesRotation(positions)
+    positions_opt = findtDesRotation(tDesign, positions)
     # println(size(positions_opt), " - ", positions_opt[:, 1:2])
 
     for j in 1:3
@@ -183,21 +156,73 @@ function case4(σ² = 2)
   return "varianceAngleOptimized-$(σ²)deg"
 end
 
-function case5(σ₁² = 2, σ₂² = 1)
-  if σ₁² < 0 || σ₂² < 0
-    throw(ArgumentError("Variance must be a non-negative number."))
+function case5(σ₁² = 2^2, σ₂² = (0.0115, (1.1e-3/sqrt(3))^2), σ₃² = (0.05, [3e-6, 24e-6]))
+  global σ²ᵦ
+
+  # Bᵢᵏ = Rᵏ * bᵏ + Oᵏ
+  bᵏ = ustrip(parseMagSphereFile("data/HeadScannerAxisAlignmentReady2.txt")[:, :, 1])
+  bᵏ_mc = [Particles{Float64, PARTICLE_COUNT}(0.0) for _ in 1:3, _ in 1:N]
+  for i in 1:N
+    bᵏ_mc[:, i] = bᵏ[:, i] + [Particles(PARTICLE_COUNT, Normal(0, σ₃²[1] * abs(b) + sum(σ₃²[2]))) for b in bᵏ[:, i]]
+  end
+  Rᵏ, Oᵏ = calibSensorRotationWithoutZeroMeas(
+    asin(σ₂²[1]) / sqrt(3), sqrt(σ₂²[2]);
+    fnXPlus = "data/20mTXPlusCalib.txt",
+    fnXMinus = "data/20mTXMinusCalib.txt",
+    fnYPlus = "data/20mTYPlusCalib.txt",
+    fnYMinus = "data/20mTYMinusCalib.txt",
+    fnZPlus = "data/20mTZPlusCalib.txt",
+    fnZMinus = "data/20mTZMinusCalib.txt",
+    N = N,
+    PARTICLE_COUNT = PARTICLE_COUNT
+  )
+  println("Rᵏ: ", size(Rᵏ), " - ", Rᵏ[1:2, :, :])
+  println("Oᵏ: ", size(Oᵏ), " - ", Oᵏ[1:2, :])
+  println("bᵏ: ", size(bᵏ_mc), " - ", bᵏ_mc[:, 1:2])
+  Bᵢᵏ_mc = [Particles{Float64, PARTICLE_COUNT}(0.0) for _ in 1:3, _ in 1:N]
+  for i in 1:N
+    Bᵢᵏ_mc[:, i] = Rᵏ[i, :, :] * bᵏ_mc[:, i] + Oᵏ[i, :]
+  end
+  println("Bᵢᵏ_mc: ", size(Bᵢᵏ_mc), " - ", Bᵢᵏ_mc[:, 1:2])
+
+  rs = [Rᵏ[i, :, 3] / norm(Rᵏ[i, :, 3]) for i in 1:N]
+  println("rs: ", size(rs), " - ", rs[1:2])
+  ps = reduce(hcat, map(cartesian_to_spherical, rs))
+  println("ps: ", size(ps), " - ", ps[:, 1:2])
+  ps_mc = reduce(hcat, [ps[:, i] + [0, deg2rad(Particles(PARTICLE_COUNT, Normal(0, sqrt(σ₁²)))), deg2rad(Particles(PARTICLE_COUNT, Normal(0, sqrt(σ₁²)))) / sin(ps[2, i] == 0 ? 1e-9 : ps[2, i])] for i in 1:N])
+  println("ps_mc: ", size(ps_mc), " - ", ps_mc[:, 1:2])
+  rs_mc = reduce(hcat, map(spherical_to_cartesian, eachcol(ps_mc)))
+  println("rs_mc: ", size(rs_mc), " - ", rs_mc[:, 1:2])
+
+  rs_opt = [Particles(PARTICLE_COUNT) for _ in 1:3, _ in 1:N]
+  for i in 1:PARTICLE_COUNT
+    positions = map(p -> p.particles[i], rs_mc)
+    positions_opt = findtDesRotation(tDesign, positions)
+
+    for j in 1:3
+      for k in 1:N
+        rs_opt[j, k].particles[i] = positions_opt[j, k]
+      end
+    end
+  end
+  rs_opt = [rs_opt[:, i] for i in 1:N]
+  println("rs_opt: ", size(rs_opt), " - ", rs_opt[1:2])
+
+  for l in 0:L
+    for m in -l:l
+      Zₗᵐ = SphericalHarmonicExpansions.zlm(l, m, x, y, z)
+      f = (r) -> Zₗᵐ(x => r[1], y => r[2], z => r[3])
+      rs_optᵣ = map(f, rs_opt)
+
+      for i in 1:3
+        γⁱₗₘ = (2l + 1) / (R^l * N) * sum(Bᵢᵏ_mc[i, :] .* rs_optᵣ)
+        σᵧ = std(γⁱₗₘ.particles)
+        σ²ᵦ[i] += σᵧ * Zₗᵐ * Zₗᵐ
+      end
+    end
   end
 
-  # Assuming variance of angle from sphere center sensor position in degrees (θ, ϕ)
-  # The erroneous sensor positions are optimized to minimize square distance to all expected sensor positions
-  # The optimized sensor positions are passed to the solid harmonics
-  figname = case4(σ₁²)
-
-  # Assuming variance of solid harmonics (Z_l^m)
-  figname *= " + " * case2(σ₂²)
-
-  return figname
-
+  return "combinedAngle-$(σ₁²)FieldUncertainty-$(σ₂²)-$(σ₃²)"
 end
 
 coeffs = h5read("data/coeffs.h5", "coeffs")
@@ -211,7 +236,17 @@ fs = [(ix, iy, iz) -> B[i](x => ix, y => iy, z => iz) for i in 1:3]
 # figname = case2()
 # figname = case3()
 # figname = case4()
-figname = case4(1)
+figname = case5() # 24%, 11%, 20%
+
+# figname = case5(0, (0.0115, (1.1e-3/sqrt(3))^2), (0.05, [3e-6, 24e-6])) # 24%, 11%, 20%
+# figname = case5(2^2, (0, 0), (0.05, [3e-6, 24e-6])) # 2.5%, 1.7%, 3.1%
+# figname = case5(2^2, (0.0115, (1.1e-3/sqrt(3))^2), (0, [0])) # 23%, 11%, 20%
+
+# figname = case5(2^2, (0, 0), (0, [0])) # 0.25%, 0.36%, 0.63%
+# figname = case5(0, (0.0115, (1.1e-3/sqrt(3))^2), (0, [0])) # 23%, 10%, 19%
+# figname = case5(0, (0, 0), (0.05, [0])) # 2.4%, 1.4%, 2.5%
+
+# figname = case5(0, (0, 0), (0, [0])) # 0.004%, 0.0016%, 0.0045%
 
 if !isdir("figures/$figname")
   mkdir("figures/$figname")
@@ -221,7 +256,7 @@ Bₑ = σ²ᵦ
 fsₑ = [(ix, iy, iz) -> Bₑ[i](x => ix, y => iy, z => iz) for i in 1:3]
 if false
   fignumber = plotMagneticField([fsₑ[1], fsₑ[2], fsₑ[3]], R, center=center)
-  savefig("figures/$figname/2D.png", fignumber)
+  savefig("figures/$figname/2D-$(DEBUG ? 'd' : 'r').png", fignumber)
 end
 
 # fsᵣₑₗ = [(x, y, z) -> fsₑ[i](x, y, z) / fs[i](x, y, z) for i in 1:3]
@@ -239,8 +274,7 @@ end
 
 averageFieldErrorStrings = Dict{String, String}()
 for (fₑ, fᵣₑₗ, dir) in zip(fsₑ, fsᵣₑₗ, ["x", "y", "z"])
-  fₐ = (a, b, c) -> abs(fₑ(a, b, c))
-  averageError = meanErrorMonteCarlo(fₐ, R, SAMPLES)
+  averageError = meanErrorMonteCarlo(fₑ, R, SAMPLES)
 
   fₐᵣ = (a, b, c) -> abs(fᵣₑₗ(a, b, c))
   averageRelativeError = meanErrorMonteCarlo(fₐᵣ, R, SAMPLES)
@@ -250,55 +284,82 @@ for (fₑ, fᵣₑₗ, dir) in zip(fsₑ, fsᵣₑₗ, ["x", "y", "z"])
   println("Mean field error in $dir-direction: ", averageDirErrorStr)
 end
 
-xs, ys, zs = ntuple(_ -> range(-R, R; length=STEPS), 3)
+if false
+  valueDistributionFig = GLMakie.Figure(size=(1400, 400), resolution=(2800, 800), fontsize=28)
+  for (i, (fₑ, fᵦ, dir)) in enumerate(zip(fsₑ, fs, ["x", "y", "z"]))
+    values = pairwiseMonteCarlo(fₑ, fᵦ, R, SAMPLES)
 
-fieldErrorᵢ = [[(x^2 + y^2 + z^2 <= R^2) ? abs.(f(x, y, z)) : NaN for x in xs, y in ys, z in zs] for f in fsₑ]
-fieldᵢ = [[(x^2 + y^2 + z^2 <= R^2) ? abs.(f(x, y, z)) : NaN for x in xs, y in ys, z in zs] for f in fs]
-relativeErrorᵢ = [fieldErrorᵢ[i] ./ fieldᵢ[i] for i in 1:3]
-all_rel_errors = vcat([vec(re[.!isnan.(re) .& .!isinf.(re)]) for re in relativeErrorᵢ]...)
-upper = mean(all_rel_errors) + 2 * std(all_rel_errors)
-relativeErrorᵢ = [clamp.(re, 0, upper) for re in relativeErrorᵢ]
+    # Sort the rows of the SAMPLES x 2 values matrix by the values in the second column
+    values_sorted = values[sortperm(values[:, 2]), :]
 
-# Find the global min and max for color scaling
-crangeₑ = extrema(Iterators.flatten(ferr for fe in fieldErrorᵢ for ferr in fe if !isnan(ferr)))
-crange = extrema(Iterators.flatten(f for fe in fieldᵢ for f in fe if !isnan(f)))
-crangeᵣₑₗ = extrema(Iterators.flatten(ferr for fe in relativeErrorᵢ for ferr in fe if !isnan(ferr)))
-
-fig = GLMakie.Figure(size=(1400, 1200), resolution=(2800, 2400), fontsize=28)
-
-axsᵣₑₗ = [Axis3(fig[1, i]; aspect=(1,1,1), perspectiveness=0.5, xlabeloffset=100, ylabeloffset=100, zlabeloffset=100) for i=1:3]
-volsᵣₑₗ = [volume!(axsᵣₑₗ[i], xs, ys, zs, relativeErrorᵢ[i]; colorrange=crangeᵣₑₗ) for i in 1:3]
-Colorbar(fig[1, 4], volsᵣₑₗ[1], label="Relative Error", height=Relative(0.7))
-for (ax, label) in zip(axsᵣₑₗ, ["x", "y", "z"])
-  ax.title = "$label-dir (ME: $(averageFieldErrorStrings[label]))"
+    ax = Axis(valueDistributionFig[1, i], xlabel="Field Value / T", ylabel = i == 1 ? "Error Value / T" : "", title="Error vs Field Value Distribution ($dir-dir)")
+    scatter!(ax, values_sorted[:, 2], values_sorted[:, 1], markersize=6, color=:blue)
+    # lines!(ax, values_sorted[:, 2], values_sorted[:, 2], color=:red, linewidth=2, label="y = x")
+  end
+  save("figures/$figname/values-$(DEBUG ? 'd' : 'r').png", valueDistributionFig)
 end
 
-axsₑ = [Axis3(fig[2, i]; aspect=(1,1,1), perspectiveness=0.5, xlabeloffset=100, ylabeloffset=100, zlabeloffset=100) for i=1:3]
-volsₑ = [volume!(axsₑ[i], xs, ys, zs, fieldErrorᵢ[i]; colorrange=crangeₑ) for i in 1:3]
-Colorbar(fig[2, 4], volsₑ[1], label="Field Error", height=Relative(0.7))
+if !DEBUG
+  xs, ys, zs = ntuple(_ -> range(-R, R; length=STEPS), 3)
 
-axs = [Axis3(fig[3, i]; aspect=(1,1,1), perspectiveness=0.5, xlabeloffset=100, ylabeloffset=100, zlabeloffset=100) for i=1:3]
-vols = [volume!(axs[i], xs, ys, zs, fieldᵢ[i]; colorrange=crange) for i in 1:3]
-Colorbar(fig[3, 4], vols[1], label="Field", height=Relative(0.7))
-save("figures/$figname/3D-$(DEBUG ? 'd' : 'r').png", fig)
+  fieldErrorᵢ = [[(x^2 + y^2 + z^2 <= R^2) ? abs.(f(x, y, z)) : NaN for x in xs, y in ys, z in zs] for f in fsₑ]
+  fieldᵢ = [[(x^2 + y^2 + z^2 <= R^2) ? abs.(f(x, y, z)) : NaN for x in xs, y in ys, z in zs] for f in fs]
+  relativeErrorᵢ = [fieldErrorᵢ[i] ./ fieldᵢ[i] for i in 1:3]
+  all_rel_errors = vcat([vec(re[.!isnan.(re) .& .!isinf.(re)]) for re in relativeErrorᵢ]...)
+  upper = mean(all_rel_errors) + 2 * std(all_rel_errors)
+  # upper = 0.5
+  relativeErrorᵢ = [clamp.(re, 0, upper) for re in relativeErrorᵢ]
 
-all_axes = vcat(axsᵣₑₗ, axsₑ, axs)
-for ax in all_axes
-  ax.viewmode = :fit
-  ax.tellwidth = false
-  ax.tellheight = false
-  ax.width = 400
-  ax.height = 400
-  ax.protrusions = 0
-  attributes = ["ticksvisible", "labelvisible", "ticklabelsvisible", "gridvisible", "spinesvisible"]
-  for attr in attributes
-    for dir in [:x, :y, :z]
-      setproperty!(ax, Symbol(dir, attr), false)
+  # Find the global min and max for color scaling
+  crangeₑ = extrema(Iterators.flatten(ferr for fe in fieldErrorᵢ for ferr in fe if !isnan(ferr)))
+  crange = extrema(Iterators.flatten(f for fe in fieldᵢ for f in fe if !isnan(f)))
+  crangeᵣₑₗ = extrema(Iterators.flatten(ferr for fe in relativeErrorᵢ for ferr in fe if !isnan(ferr)))
+
+  fig = GLMakie.Figure(size=(1400, 1200), resolution=(2800, 2400), fontsize=28)
+
+  axsᵣₑₗ = [Axis3(fig[1, i]; aspect=(1,1,1), perspectiveness=0.5, xlabeloffset=100, ylabeloffset=100, zlabeloffset=100) for i=1:3]
+  volsᵣₑₗ = [volume!(axsᵣₑₗ[i], xs, ys, zs, relativeErrorᵢ[i]; colorrange=crangeᵣₑₗ) for i in 1:3]
+  Colorbar(fig[1, 4], volsᵣₑₗ[1], label="Relative Error", height=Relative(0.7))
+  for (ax, label) in zip(axsᵣₑₗ, ["x", "y", "z"])
+    ax.title = "$label-dir (ME: $(averageFieldErrorStrings[label]))"
+  end
+
+  axsₑ = [Axis3(fig[2, i]; aspect=(1,1,1), perspectiveness=0.5, xlabeloffset=100, ylabeloffset=100, zlabeloffset=100) for i=1:3]
+  volsₑ = [volume!(axsₑ[i], xs, ys, zs, fieldErrorᵢ[i]; colorrange=crangeₑ) for i in 1:3]
+  Colorbar(fig[2, 4], volsₑ[1], label="Field Error", height=Relative(0.7))
+
+  axs = [Axis3(fig[3, i]; aspect=(1,1,1), perspectiveness=0.5, xlabeloffset=100, ylabeloffset=100, zlabeloffset=100) for i=1:3]
+  vols = [volume!(axs[i], xs, ys, zs, fieldᵢ[i]; colorrange=crange) for i in 1:3]
+  Colorbar(fig[3, 4], vols[1], label="Field", height=Relative(0.7))
+
+  for ax in vcat(axsᵣₑₗ, axsₑ, axs)
+    ax.xlabel = "x / mm"
+    ax.ylabel = "y / mm"
+    ax.zlabel = "z / mm"
+  end
+
+  save("figures/$figname/3D-$(DEBUG ? 'd' : 'r').png", fig)
+
+  all_axes = vcat(axsᵣₑₗ, axsₑ, axs)
+  for ax in all_axes
+    ax.viewmode = :fit
+    ax.tellwidth = false
+    ax.tellheight = false
+    ax.width = 400
+    ax.height = 400
+    ax.protrusions = 0
+    attributes = ["ticksvisible", "labelvisible", "ticklabelsvisible", "gridvisible", "spinesvisible"]
+    for attr in attributes
+      for dir in [:x, :y, :z]
+        setproperty!(ax, Symbol(dir, attr), false)
+      end
     end
   end
-end
-angles = range(0, 2π; length=FRAMES+1)[1:end-1]
+  angles = range(0, 2π; length=FRAMES+1)[1:end-1]
 
-record(fig, "figures/$figname/animation-$(DEBUG ? 'd' : 'r').gif", 1:FRAMES) do i
-  map(ax -> ax.azimuth = angles[i], all_axes)
+  record(fig, "figures/$figname/animation-$(DEBUG ? 'd' : 'r').gif", 1:FRAMES) do i
+    map(ax -> ax.azimuth = angles[i], all_axes)
+  end
+
+  fig
 end

@@ -1,5 +1,3 @@
-deg2rad = π / 180
-
 function cartesian_to_spherical(v)
   x, y, z = v[1], v[2], v[3]
 
