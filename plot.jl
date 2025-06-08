@@ -1,4 +1,4 @@
-using TypedPolynomials
+using DynamicPolynomials
 using SphericalHarmonicExpansions
 using MPIFiles
 include("utils/plotMagneticField.jl")
@@ -29,7 +29,7 @@ L = 6
 T = 12
 R = 0.045#0.04541
 center = [0.0, 0.0, 0.0]
-TypedPolynomials.@polyvar x y z
+DynamicPolynomials.@polyvar x y z
 
 # MagSphere parameters
 N = 86
@@ -183,25 +183,23 @@ plotSlices(axs[4], fsₑ[3])
 # Colorbar(fig[1, 4], axs[1])
 
 save("figures/$figname.png", fig)
-fig
 
-# all_axes = vcat(axsᵣₑₗ, axsₑ, axs)
-# for ax in all_axes
-#   ax.viewmode = :fit
-#   ax.tellwidth = false
-#   ax.tellheight = false
-#   ax.width = 400
-#   ax.height = 400
-#   ax.protrusions = 0
-#   attributes = ["ticksvisible", "labelvisible", "ticklabelsvisible", "gridvisible", "spinesvisible"]
-#   for attr in attributes
-#     for dir in [:x, :y, :z]
-#       setproperty!(ax, Symbol(dir, attr), false)
-#     end
-#   end
-# end
-# angles = range(0, 2π; length=FRAMES+1)[1:end-1]
+for ax in axs
+  ax.viewmode = :fit
+  # ax.tellwidth = false
+  # ax.tellheight = false
+  # ax.width = 400
+  # ax.height = 400
+  # ax.protrusions = 0
+  attributes = ["ticksvisible", "labelvisible", "ticklabelsvisible", "gridvisible", "spinesvisible"]
+  for attr in attributes
+    for dir in [:x, :y, :z]
+      setproperty!(ax, Symbol(dir, attr), false)
+    end
+  end
+end
+angles = range(-0.75π, 1.25π; length=FRAMES+1)[1:end-1]
 
-# record(fig, "figures/$figname/animation-$(DEBUG ? 'd' : 'r').gif", 1:FRAMES) do i
-#   map(ax -> ax.azimuth = angles[i], all_axes)
-# end
+record(fig, "figures/$figname.gif", 1:FRAMES) do i
+  map(ax -> ax.azimuth = angles[i], axs)
+end
