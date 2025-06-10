@@ -4,6 +4,12 @@ include("coordinateConvert.jl")
 using DelimitedFiles
 using Unitful
 
+function getRandomDir()
+    θ = rand(0:2π)
+    φ = acos(2 * rand() - 1)
+    return spherical_to_cartesian([1.0, θ, φ])
+end
+
 function parseMagSphereFileV1(filename::String)
     return reshape(readdlm(filename)[:,1:2:end], :,3,86)
 end
@@ -24,7 +30,7 @@ function parseMagSphereFile(filename::String)
 end
 
 function calibSensorRotationWithoutZeroMeas(
-    σₐ, σᵣ;
+    σₐ, σᵣ, σₑ;
     fnXPlus::String, fnXMinus::String,
     fnYPlus::String, fnYMinus::String,
     fnZPlus::String, fnZMinus::String,
@@ -98,10 +104,14 @@ function calibSensorRotationWithoutZeroMeas(
     # b_mc = fill(Particles{Float64, PARTICLE_COUNT}(0.0), length(b))
     b_mc = [Particles{Float64, PARTICLE_COUNT}(0.0) for _ in 1:length(b)]
     for i in 1:3:length(b)
+        pₑ_mc = [Particles{Float64, PARTICLE_COUNT}(σₑ), acos(Particles(PARTICLE_COUNT, Uniform(-1, 1))), Particles(PARTICLE_COUNT, Uniform(0, 2π))]
+        rₑ_mc = spherical_to_cartesian(pₑ_mc)
+
         r = b[i:i+2]
         p = cartesian_to_spherical(r)
         p_mc = p + [Particles(PARTICLE_COUNT, Normal(0, σᵣ)), Particles(PARTICLE_COUNT, Normal(0, σₐ / sqrt(2))), Particles(PARTICLE_COUNT, Normal(0, σₐ / sqrt(2))) / sin(p[2] == 0 ? 1e-9 : p[2])]
         r_mc = spherical_to_cartesian(p_mc)
+        r_mc += rₑ_mc # Influence of Earth's magnetic field
         b_mc[i:i+2] = copy(r_mc)
     end
 
