@@ -1,4 +1,4 @@
-using DynamicPolynomials
+using TypedPolynomials
 using SphericalHarmonicExpansions
 using MPIFiles
 include("utils/plotMagneticField.jl")
@@ -18,7 +18,7 @@ using HDF5
 using DelimitedFiles
 
 # Debug parameters
-DEBUG = false
+DEBUG = true
 PARTICLE_COUNT = DEBUG ? 10^1 : 10^3
 SAMPLES        = DEBUG ? 10^2 : 10^5
 STEPS          = DEBUG ? 25   : 10^2
@@ -29,7 +29,7 @@ L = 6
 T = 12
 R = 0.045#0.04541
 center = [0.0, 0.0, 0.0]
-DynamicPolynomials.@polyvar x y z
+TypedPolynomials.@polyvar x y z
 
 # MagSphere parameters
 N = 86
@@ -121,12 +121,14 @@ Bₑ = σ²ᵦ
 fsₑ = [(ix, iy, iz) -> Bₑ[i](x => ix, y => iy, z => iz) for i in 1:3]
 fieldErrorᵣ = (ix, iy, iz) -> map(f -> f(ix, iy, iz), fsₑ)
 
+scales = [1e3, 1e6]
+
 averageFieldErrorStrings = Dict{String, String}()
 for (fₑ, dir) in zip(fsₑ, ["x", "y", "z"])
   averageError = meanErrorMonteCarlo(fₑ, R, SAMPLES)
   # averageError = meanError(fₑ, R)
 
-  averageDirErrorStr = @sprintf("%.4g", averageError)
+  averageDirErrorStr = @sprintf("%.4g", averageError * scales[2])
   averageFieldErrorStrings[dir] = averageDirErrorStr
   println("Mean field error in $dir-direction: ", averageDirErrorStr)
 end
@@ -134,11 +136,20 @@ end
 xs, ys, zs = ntuple(_ -> range(-R, R; length=STEPS), 3)
 xsₐ, ysₐ, zsₐ = ntuple(_ -> range(-R, R; length=20), 3)
 
-fig = GLMakie.Figure(size=(2200, 500), resolution=(8800, 2000), fontsize=28)
+fig = GLMakie.Figure(size=(2200, 500), resolution=(8800, 2000), fontsize=56)
 
-axs = [Axis3(fig[1, i]; aspect=:data, elevation=0.25π, azimuth=-0.75π, xlabel="x / mm", ylabel="y / mm", zlabel="z / mm", xlabeloffset=100, ylabeloffset=100, zlabeloffset=100) for i=1:4]
+axs = [Axis3(fig[1, i == 1 ? i : i+1]; height=Relative(0.9), aspect=:data, elevation=0.25π, azimuth=-0.75π, xlabel="x / mm", ylabel="y / mm", zlabel="z / mm", xlabeloffset=200, ylabeloffset=200, zlabeloffset=200) for i=1:4]
+axs[1].title = "Measured field"
+for (i, dir) in enumerate(["x", "y", "z"])
+  axs[i+1].title = "Field error in $dir-direction\n(ME: $(averageFieldErrorStrings[dir]) μT)"
+end
 
-function plotSlices(ax, f, min_arrow_norm=0.002)
+cranges = [
+  extrema(norm.(fieldᵣ.(xs, ys, zs))) .* scales[1],
+  extrema(Iterators.flatten(norm.(f.(xs, ys, zs)) for f in fsₑ)) .* scales[2],
+]
+
+function plotSlices(ax, f, crange, scale, min_arrow_norm=0.002)
     # Hilfsfunktion für Slice-Plot und Pfeile
     function slice_surface!(plane, ax, f; arrow_scale=0.3)
         if plane == :xy
@@ -158,9 +169,9 @@ function plotSlices(ax, f, min_arrow_norm=0.002)
             ps = [Point3f(0, y, z) for y in ysₐ, z in zsₐ if y^2 + z^2 <= R^2]
         end
         # Feldwerte und Maske
-        B = norm.(f.(X, Y, Z))
+        B = norm.(f.(X, Y, Z)) * scale
         B[.!mask] .= NaN
-        surface!(ax, X, Y, Z; color=B, colormap=:viridis, transparency=true, alpha=0.7)
+        surface!(ax, X, Y, Z; color=B, colormap=:viridis, transparency=true, alpha=0.7, colorrange=crange)
         # Feldpfeile
         ns = map(p -> begin
             v = arrow_scale * Vec3f(f(p[1], p[2], p[3]))
@@ -175,31 +186,35 @@ function plotSlices(ax, f, min_arrow_norm=0.002)
     slice_surface!(:yz, ax, f)
 end
 
-plotSlices(axs[1], fieldᵣ)
-plotSlices(axs[2], fsₑ[1])
-plotSlices(axs[3], fsₑ[2])
-plotSlices(axs[4], fsₑ[3])
+plotSlices(axs[1], fieldᵣ, cranges[1], scales[1])
+plotSlices(axs[2], fsₑ[1], cranges[2], scales[2])
+plotSlices(axs[3], fsₑ[2], cranges[2], scales[2])
+plotSlices(axs[4], fsₑ[3], cranges[2], scales[2])
 
-# Colorbar(fig[1, 4], axs[1])
+Colorbar(fig[1, 2], limits=cranges[1], label="||B||₂ / mT", height=Relative(0.8), width=20)
+Colorbar(fig[1, 6], limits=cranges[2], label="||B||₂ / μT", height=Relative(0.8), width=20)
 
 save("figures/$figname.png", fig)
 
-for ax in axs
-  ax.viewmode = :fit
-  # ax.tellwidth = false
-  # ax.tellheight = false
-  # ax.width = 400
-  # ax.height = 400
-  # ax.protrusions = 0
-  attributes = ["ticksvisible", "labelvisible", "ticklabelsvisible", "gridvisible", "spinesvisible"]
-  for attr in attributes
-    for dir in [:x, :y, :z]
-      setproperty!(ax, Symbol(dir, attr), false)
+if false
+  for ax in axs
+    ax.viewmode = :fit
+    ax.tellwidth = false
+    ax.tellheight = false
+    # ax.width = 400
+    ax.height = Relative(0.9)
+    ax.protrusions = 0
+    attributes = ["ticksvisible", "labelvisible", "ticklabelsvisible", "gridvisible", "spinesvisible"]
+    for attr in attributes
+      for dir in [:x, :y, :z]
+        setproperty!(ax, Symbol(dir, attr), false)
+      end
     end
   end
-end
-angles = range(-0.75π, 1.25π; length=FRAMES+1)[1:end-1]
 
-record(fig, "figures/$figname.gif", 1:FRAMES) do i
-  map(ax -> ax.azimuth = angles[i], axs)
+  angles = range(-0.75π, 1.25π; length=FRAMES+1)[1:end-1]
+
+  record(fig, "figures/$figname.gif", 1:FRAMES) do i
+    map(ax -> ax.azimuth = angles[i], axs)
+  end
 end
