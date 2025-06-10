@@ -27,14 +27,14 @@ function plotSphere()
   )
   rs_mc = map(spherical_to_cartesian, ps_mc)
 
-  fig = Figure(resolution = (900, 900), fontsize = 10)
+  fig = GLMakie.Figure(resolution = (900, 900), fontsize = 10)
   ax = Axis3(fig[1, 1], title = "Random Angle Simulation", xlabel = "X", ylabel = "Y", zlabel = "Z")
 
   for r_mc in rs_mc
       scatter!(ax, r_mc[1].particles, r_mc[2].particles, r_mc[3].particles, markersize = 2, color = :blue, label = "Particles")
   end
 
-  sphere = Sphere(Point3f(0), 1)
+  sphere = GLMakie.Sphere(Point3f(0), 1)
   # sphere = GeometryBasics.mesh(Tesselation(sphere, 256))
   GLMakie.mesh!(ax, sphere, color = (:white, 0.25), transparency = true)
 
@@ -44,21 +44,20 @@ function plotSphere()
   fig
 end
 
-function random_points_on_sphere_around(p)
-    r = spherical_to_cartesian(p)
-    t1 = normalize(nullspace(r')[:, 1])
-    t2 = normalize(cross(r, t1))
-    r_mc = [Particles(PARTICLE_COUNT) for _ in 1:3]
-    for i in 1:PARTICLE_COUNT
-        a, b = randn(2) .* (deg2rad(σ * R))
-        v = a * t1 + b * t2
-        θ = norm(v)
-        point = θ ≈ 0 ? p : cos(θ) * p + sin(θ) * v / θ
-        for j in 1:3
-          r_mc[j].particles[i] = point[j]
-        end
-    end
-    return map(cartesian_to_spherical, r_mc)
+function plotRandomDirection()
+  pₑ_mc = [Particles{Float64, PARTICLE_COUNT}(1), acos(Particles(PARTICLE_COUNT, Uniform(-1, 1))), Particles(PARTICLE_COUNT, Uniform(0, 2π))]
+
+  rₑ_mc = spherical_to_cartesian(pₑ_mc)
+
+  fig = GLMakie.Figure(resolution = (900, 900), fontsize = 10)
+  ax = Axis3(fig[1, 1], title = "Random Direction Simulation", xlabel = "X", ylabel = "Y", zlabel = "Z")
+  scatter!(ax, rₑ_mc[1].particles, rₑ_mc[2].particles, rₑ_mc[3].particles, markersize = 2, color = :blue, label = "Particles")
+  sphere = GLMakie.Sphere(Point3f(0), 1)
+  GLMakie.mesh!(ax, sphere, color = (:white, 0.25), transparency = true)
+  ax.limits = Tuple(map(extrema, map(o -> o.particles, rₑ_mc)))
+  ax.aspect = :data
+  fig
 end
 
-plotSphere()
+# plotSphere()
+plotRandomDirection()
