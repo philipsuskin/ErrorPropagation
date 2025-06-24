@@ -1,6 +1,7 @@
 using Manifolds, ManifoldDiff
 using LinearAlgebra
 using Manopt
+using ForwardDiff
 
 # Define cost funtion ∑ᵢ d(p*tDesᵢ,estimatedᵢ)², where d is the geodesic distance on the sphere S², tDesᵢ is a point from the tdesign positions in the CAD model, estimatedᵢ is a point from sensor estimation by their rotation matrices and p is a rotation matrix
 function findtDesRotation(tDesign, estimatedPos)
